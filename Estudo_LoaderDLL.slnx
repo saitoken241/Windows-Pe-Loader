@@ -3,5 +3,6 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="Estudo_LoaderDLL/Estudo_LoaderDLL.vcxproj" />
+  <Project Path="Estudo_LoaderDLL/Estudo_LoaderDLL.vcxproj" Id="1079f3f0-f1f6-4267-b8ee-c4dd4d354bbe" />
+  <Project Path="TESTDll/TESTDll.vcxproj" Id="3cfe57d0-6872-46c0-af72-b442d5327c2a" />
 </Solution>

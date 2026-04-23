@@ -3,6 +3,7 @@
 #include <fstream>
 #include <vector>
 
+using DllMain_t = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
 //FORMATO PE = header do image_dos -> dos_stub -> header do image_nt -> section_header -> section 
 
 // converte um RVA (endereco relativo a ImageBase) para um offset real no arquivo em disco
@@ -24,9 +25,87 @@ int rvaToOffset(IMAGE_NT_HEADERS* nt, DWORD RVA) {
     return 0; // RVA não encontrado em nenhuma seção
 }
 
+int runIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt) {
+  
+    //RVA DO Import Table(IAT) = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress
+    auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    DWORD IatOffset = rvaToOffset(nt, IAT);
+    std::cout << "Import Table(IAT) RVA:    0x" << std::hex << IAT << std::endl;
+    std::cout << "Import Table(IAT) offset: 0x" << std::hex << IatOffset << "\n\n";
+
+    //LISTA DE TODOS OS IMPORTS 
+    //CAST DO IMAGE_IMPORT_DESCRIPTOR = IID
+    // cada entrada IID representa uma DLL importada, a lista termina quando Name == 0
+    auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset);
+
+    while (iid->Name != 0) {
+        DWORD NameOffset = rvaToOffset(nt, iid->Name); // Name e um RVA para o nome da DLL em ASCII
+        std::string dllName = (char*)(buffer.data() + NameOffset);
+
+        std::cout << "DLL_Name: " << dllName << std::endl;
+
+        if (iid->OriginalFirstThunk != 0) {
+            // OriginalFirstThunk aponta para um array de IMAGE_THUNK_DATA
+            // cada elemento do array representa uma funcao importada
+            DWORD Image_Thunk_DataOffset = rvaToOffset(nt, iid->OriginalFirstThunk);
+            auto itd = (IMAGE_THUNK_DATA*)(buffer.data() + Image_Thunk_DataOffset);
+
+            // percorre o array de thunks ate encontrar o elemento zerado (fim da lista)
+            while (itd->u1.AddressOfData != 0) {
+                // u1.AddressOfData e um RVA para IMAGE_IMPORT_BY_NAME
+                // IMAGE_IMPORT_BY_NAME contem o hint e o nome da funcao importada
+                DWORD Image_Import_By_NameOffset = rvaToOffset(nt, itd->u1.AddressOfData);
+                auto iibn = (IMAGE_IMPORT_BY_NAME*)(buffer.data() + Image_Import_By_NameOffset);
+                std::cout << "Functions import:" << iibn->Name << std::endl;
+                itd++; // avanca para a proxima funcao importada
+            }
+            std::cout << "\n";
+        }
+    
+        iid++; // avanca para a proxima DLL importada
+
+    }
+    return 0;
+
+}
+
+int resolveIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt, LPVOID base_address) {
+    auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    DWORD IatOffset = rvaToOffset(nt, IAT);
+    auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset);
+    while (iid->Name != 0) {
+        DWORD NameOffset = rvaToOffset(nt, iid->Name);
+        LPCSTR dllName = (char*)(buffer.data() + NameOffset);
+        HMODULE hDll = LoadLibraryA(dllName);
+        auto orig = (IMAGE_THUNK_DATA*)(buffer.data() + rvaToOffset(nt, iid->OriginalFirstThunk));
+        auto iat = (IMAGE_THUNK_DATA*)((BYTE*)base_address + iid->FirstThunk);
+        while (orig->u1.AddressOfData != 0) {
+            DWORD Image_Import_By_NameOffset = rvaToOffset(nt, orig->u1.AddressOfData);
+            auto iibn = (IMAGE_IMPORT_BY_NAME*)(buffer.data() + Image_Import_By_NameOffset);
+            FARPROC funcAddr = GetProcAddress(hDll, iibn->Name);
+            *(ULONGLONG*)iat = (ULONGLONG)funcAddr;
+            if (funcAddr == nullptr) {
+                std::cout << "ERRO: funcao nao resolvida: " << iibn->Name << "\n";
+
+            }
+            orig++;
+            iat++;
+        }
+        iid++;
+    }
+    
+   
+    
+
+    return 0;
+}
+
+
+    
+
 
 int runPE() {
-    std::ifstream file("C:\\Windows\\System32\\user32.dll", std::ios::binary); //abre arquivo da dll em modo binario
+    std::ifstream file("C:\\Users\\windowsuser\\Desktop\\windows-pe-parser\\x64\\Debug\\TESTDll.dll", std::ios::binary); //abre arquivo da dll em modo binario
     if (!file) { //verifica se o file e false, se for false significa que o arquivo nao foi aberto corretamente, entao imprime a mensagem de erro e retorna 1 para apontar um erro ao completar a execucao
         std::cout << "Erro ao abrir DLL\n";
         return 1;
@@ -60,7 +139,7 @@ int runPE() {
 
     auto ImageBase = nt->OptionalHeader.ImageBase;
     std::cout << "ImageBase:  0x" << std::hex << ImageBase << "\n"; // imprime o ImageBase da dll
-    std::cout << "EntryPoint: 0x" << std::hex << nt->OptionalHeader.AddressOfEntryPoint << "\n"; // imprime o EntryPoint da dll
+    std::cout << "EntryPoint: 0x" << std::hex << nt->OptionalHeader.AddressOfEntryPoint << "\n\n"; // imprime o EntryPoint da dll
 
     auto section = IMAGE_FIRST_SECTION(nt); // Pega a primeira secao  
 
@@ -75,7 +154,7 @@ int runPE() {
         DWORD sectionStart = RVA;
         DWORD sectionEnd = sectionStart + SIZE;
 
-        std::cout << name << " | " << "RVA:0x" << std::hex << RVA << " | " << "VA:0x" << VA << " | " << "Offset:0x" << OFFSET << " | " << "Size:0x" << SIZE << std::endl;
+        std::cout << name << " | " << "RVA:0x" << std::hex << RVA << " | " << "VA:0x" << VA << " | " << "Offset:0x" << OFFSET << " | " << "Size:0x" << SIZE << "\n\n";
 
 
 
@@ -83,45 +162,11 @@ int runPE() {
     DWORD ep = nt->OptionalHeader.AddressOfEntryPoint;
     DWORD epOffset = rvaToOffset(nt, ep); // converte o RVA do entrypoint para offset no arquivo
     std::cout << "EntryPoint RVA:    0x" << std::hex << ep << std::endl;
-    std::cout << "EntryPoint Offset: 0x" << std::hex << epOffset << std::endl;
+    std::cout << "EntryPoint Offset: 0x" << std::hex << epOffset << "\n\n";
 
-    //RVA DO Import Table(IAT) = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress
-
-    auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-    DWORD IatOffset = rvaToOffset(nt, IAT);
-    std::cout << "Import Table(IAT) RVA:    0x" << std::hex << IAT << std::endl;
-    std::cout << "Import Table(IAT) offset: 0x" << std::hex << IatOffset << std::endl;
-
-    //LISTA DE TODOS OS IMPORTS 
-    //CAST DO IMAGE_IMPORT_DESCRIPTOR = IID
-    // cada entrada IID representa uma DLL importada, a lista termina quando Name == 0
-    auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset);
-
-    while (iid->Name != 0) {
-        DWORD NameOffset = rvaToOffset(nt, iid->Name); // Name e um RVA para o nome da DLL em ASCII
-        std::string dllName = (char*)(buffer.data() + NameOffset);
-
-        std::cout << "dllName: " << dllName << std::endl;
-
-        if (iid->OriginalFirstThunk != 0) {
-            // OriginalFirstThunk aponta para um array de IMAGE_THUNK_DATA
-            // cada elemento do array representa uma funcao importada
-            DWORD Image_Thunk_DataOffset = rvaToOffset(nt, iid->OriginalFirstThunk);
-            auto itd = (IMAGE_THUNK_DATA*)(buffer.data() + Image_Thunk_DataOffset);
-
-            // percorre o array de thunks ate encontrar o elemento zerado (fim da lista)
-            while (itd->u1.AddressOfData != 0) {
-                // u1.AddressOfData e um RVA para IMAGE_IMPORT_BY_NAME
-                // IMAGE_IMPORT_BY_NAME contem o hint e o nome da funcao importada
-                DWORD Image_Import_By_NameOffset = rvaToOffset(nt, itd->u1.AddressOfData);
-                auto iibn = (IMAGE_IMPORT_BY_NAME*)(buffer.data() + Image_Import_By_NameOffset);
-                std::cout << iibn->Name << std::endl;
-                itd++; // avanca para a proxima funcao importada
-            }
-        }
-        iid++; // avanca para a proxima DLL importada
-
-    }
+    
+    //funcao pra listar os imports (IAT)
+    runIAT(buffer,nt);
     //LISTA DE TODOS OS EXPORTS
 
     //RVA DO Export Table
@@ -139,6 +184,84 @@ int runPE() {
 
         std::cout << "Name of Exports: " << (char*)(buffer.data() + namesArrayOffset) << std::endl;
     }
+
+
+    //aloca memoria na imagebase da dll e salva em base_address (LPVOID)ImageBase
+    LPVOID base_address = (VirtualAlloc(nullptr, nt->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+
+    //se base_addr retornar nullptr volta erro ao alocar na memoria e sai, se nao copia 
+    if (base_address == nullptr) {
+        std::cout << "Erro ao alocar memoria\n";
+        return 1;
+    }
+    else { 
+        std::cout << "\ncopiando o PE header do disco na memoria alocada...\n";
+        memcpy(base_address,buffer.data(), nt->OptionalHeader.SizeOfHeaders); //copia pe header do disco na memoria vazia alocada
+        std::cout << "copiando as sections na memoria alocada...\n";
+        for (int i = 0; i < nt->FileHeader.NumberOfSections;i++) {
+            auto& current_section = IMAGE_FIRST_SECTION(nt)[i];
+            auto Section_Offset = current_section.PointerToRawData; // offset da secao no arquivo em disco
+            memcpy((BYTE*)base_address+current_section.VirtualAddress, buffer.data() + Section_Offset, current_section.SizeOfRawData);
+        
+        
+        }
+    
+    }
+    //calculo do delta
+    auto delta = (BYTE*)base_address - nt->OptionalHeader.ImageBase;
+    
+    auto TableOffset = rvaToOffset(nt, nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress);
+    //auto ibr = (IMAGE_BASE_RELOCATION*)(buffer.data() + TableOffset); //cast image base relocation
+    auto TableSize = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].Size;
+    BYTE* Table_reloc_start = (BYTE*)(buffer.data() + TableOffset);
+    BYTE* Table_reloc_end = Table_reloc_start + TableSize;
+    BYTE* current = Table_reloc_start;
+  
+    //tabela de relocations 
+    while (current < Table_reloc_end) {
+        auto reloc = (IMAGE_BASE_RELOCATION*)current;
+        if (reloc->SizeOfBlock == 0 or reloc->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) or current + reloc->SizeOfBlock > Table_reloc_end) {
+            std::cout << "relocation invalida";
+            break;
+        }
+        WORD* entries = (WORD*)(current + sizeof(IMAGE_BASE_RELOCATION));
+        auto numEntries = (reloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+        for (int i = 0; i < numEntries; i++) {
+            auto entry = entries[i];
+            auto OFFSET = entry & 0x0FFF;
+            auto TYPE = entry >> 12;
+            auto addr = (BYTE*)base_address + reloc->VirtualAddress + OFFSET;
+            if (TYPE != 3 and TYPE != 10){continue;}
+            else {
+                std::cout << "\nTYPE:0x" << std::hex << TYPE << " | " << "OFFSET:0x" << OFFSET << " | " << "VA:0x" << (DWORD_PTR)addr << "\n\n";
+                if (TYPE == 3) {
+                    std::cout << "antes: " << std::hex << *(DWORD*)addr << "\n";
+                    DWORD* ptr = (DWORD*)addr;
+                    *ptr += (DWORD)delta;
+                    std::cout << "depois: " << std::hex << *(DWORD*)addr << "\n";
+                }
+                else if (TYPE == 10) {
+                    std::cout << "antes: " << std::hex << *(ULONGLONG*)addr << "\n";
+                    ULONGLONG* ptr = (ULONGLONG*)addr;
+                    *ptr += (ULONGLONG)delta;
+                    std::cout << "depois: " << std::hex << *(ULONGLONG*)addr << "\n";
+                }
+            }
+
+            
+        }
+        current += reloc->SizeOfBlock;
+
+
+    }
+    //chamar resolveiat para inserir os imports na memoria alocada
+    resolveIAT(buffer,nt,base_address);
+
+    
+    DllMain_t entrypoint = (DllMain_t)((BYTE*)base_address + nt->OptionalHeader.AddressOfEntryPoint);
+    
+    entrypoint((HINSTANCE)base_address,DLL_PROCESS_ATTACH, nullptr);
+
 
 
 
