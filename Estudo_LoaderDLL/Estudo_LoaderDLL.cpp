@@ -27,28 +27,29 @@ int rvaToOffset(IMAGE_NT_HEADERS* nt, DWORD RVA) {
 
 int runIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt) {
   
-    //RVA DO Import Table(IAT) = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress
-    auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-    DWORD IatOffset = rvaToOffset(nt, IAT);
+    //RVA DO Import Table(IAT) 
+    auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress; // guarda o valor do ponteiro ntheader  apontado para o array DataDirectory indice 1 == Import Table pegando o valor do RVA
+    DWORD IatOffset = rvaToOffset(nt, IAT); // converte rva do iat em offset
     std::cout << "Import Table(IAT) RVA:    0x" << std::hex << IAT << std::endl;
     std::cout << "Import Table(IAT) offset: 0x" << std::hex << IatOffset << "\n\n";
 
-    //LISTA DE TODOS OS IMPORTS 
-    //CAST DO IMAGE_IMPORT_DESCRIPTOR = IID
-    // cada entrada IID representa uma DLL importada, a lista termina quando Name == 0
-    auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset);
+    //LISTA DE TODOS OS IMPORTS - percorrimento dentro de IAT
+   
+    // cada entrada IID representa uma DLL importada, a lista termina quando N ame == 0
+    auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset);  // joga na variavel iid um ponteiro do tipo iMAGEE_IMPORT_DESCRIPTOR pegando o inicio do bufffer da dll e somandoo o offset de import table
 
-    while (iid->Name != 0) {
+    while (iid->Name != 0) { //enquanto IMAGE_IMPORT_DESCRIPTOR->NAME nao chegar  no 0
         DWORD NameOffset = rvaToOffset(nt, iid->Name); // Name e um RVA para o nome da DLL em ASCII
-        std::string dllName = (char*)(buffer.data() + NameOffset);
+        std::string dllName = (char*)(buffer.data() + NameOffset); //cria uma variavel string pegando o inicio da dll atraves do ponteiro buffer.data e somando offset para conseguir o nome da dll
 
         std::cout << "DLL_Name: " << dllName << std::endl;
 
-        if (iid->OriginalFirstThunk != 0) {
-            // OriginalFirstThunk aponta para um array de IMAGE_THUNK_DATA
-            // cada elemento do array representa uma funcao importada
-            DWORD Image_Thunk_DataOffset = rvaToOffset(nt, iid->OriginalFirstThunk);
-            auto itd = (IMAGE_THUNK_DATA*)(buffer.data() + Image_Thunk_DataOffset);
+        if (iid->OriginalFirstThunk != 0) { // se iid apontado pra originalfirthunk for difeente de 0, entao existe uma lista de funcoes importada
+                                           // originalfirsth thunk aponta pro array thunks e cada thunk eh uma funcao importada na dll especifica
+                                           // OriginalFirstThunk aponta para um array de IMAGE_THUNK_DATA
+                                           // cada elemento do array representa uma funcao importada
+            DWORD Image_Thunk_DataOffset = rvaToOffset(nt, iid->OriginalFirstThunk); // pega o pontteiro iid que aponta para  IMAGE_IMMPORT_DESCRIPTOR que  contem o campo  OriginalFirstThunk, transforma esse rva em offset e armazena na variavel
+            auto itd = (IMAGE_THUNK_DATA*)(buffer.data() + Image_Thunk_DataOffset); // cria uma variavel itd igual a ponteiro com o tipo IMAGE_THUNK_DATA apontada pro inicio de IMAGE_THUNK_DATA(Onde fica os imports)
 
             // percorre o array de thunks ate encontrar o elemento zerado (fim da lista)
             while (itd->u1.AddressOfData != 0) {
@@ -159,14 +160,14 @@ int runPE() {
 
 
     }
-    DWORD ep = nt->OptionalHeader.AddressOfEntryPoint;
-    DWORD epOffset = rvaToOffset(nt, ep); // converte o RVA do entrypoint para offset no arquivo
+    DWORD ep = nt->OptionalHeader.AddressOfEntryPoint; // guarda o entrypoint na variavel ep
+    DWORD epOffset = rvaToOffset(nt, ep); // converte o RVA do entrypoint para offset 
     std::cout << "EntryPoint RVA:    0x" << std::hex << ep << std::endl;
     std::cout << "EntryPoint Offset: 0x" << std::hex << epOffset << "\n\n";
 
-    
+
     //funcao pra listar os imports (IAT)
-    runIAT(buffer,nt);
+    runIAT(buffer, nt);
     //LISTA DE TODOS OS EXPORTS
 
     //RVA DO Export Table
@@ -178,11 +179,16 @@ int runPE() {
     // AddressOfNames e um RVA para um array de RVAs, cada um apontando para o nome de uma funcao exportada
     auto AddressofNameOffset = rvaToOffset(nt, ied->AddressOfNames);
     auto namesArrayRVA = (DWORD*)(buffer.data() + AddressofNameOffset); // cast para DWORD* para indexar o array
-    for (int i = 0; i < ied->NumberOfNames;i++) {
-        // namesArrayRVA[i] e o RVA do nome da funcao i, converte para offset e le como string ASCII
-        DWORD namesArrayOffset = rvaToOffset(nt, namesArrayRVA[i]);
+    if (IDEE != 0) {
+        for (int i = 0; i < ied->NumberOfNames;i++) {
+            // namesArrayRVA[i] e o RVA do nome da funcao i, converte para offset e le como string ASCII
+            DWORD namesArrayOffset = rvaToOffset(nt, namesArrayRVA[i]);
 
-        std::cout << "Name of Exports: " << (char*)(buffer.data() + namesArrayOffset) << std::endl;
+            std::cout << "Name of Exports: " << (char*)(buffer.data() + namesArrayOffset) << std::endl;
+        }
+    }
+    else {
+        std::cout << "Sem Exports!\n";
     }
 
 
