@@ -48,17 +48,17 @@ int runIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt) {
                                            // originalfirsth thunk aponta pro array thunks e cada thunk eh uma funcao importada na dll especifica
                                            // OriginalFirstThunk aponta para um array de IMAGE_THUNK_DATA
                                            // cada elemento do array representa uma funcao importada
-            DWORD Image_Thunk_DataOffset = rvaToOffset(nt, iid->OriginalFirstThunk); // pega o pontteiro iid que aponta para  IMAGE_IMMPORT_DESCRIPTOR que  contem o campo  OriginalFirstThunk, transforma esse rva em offset e armazena na variavel
-            auto itd = (IMAGE_THUNK_DATA*)(buffer.data() + Image_Thunk_DataOffset); // cria uma variavel itd igual a ponteiro com o tipo IMAGE_THUNK_DATA apontada pro inicio de IMAGE_THUNK_DATA(Onde fica os imports)
+            DWORD Image_Thunk_DataOffset = rvaToOffset(nt, iid->OriginalFirstThunk); //  iid é um ponteiro  para  IMAGE_IMPORT_DESCRIPTOR que  contem o campo  OriginalFirstThunk, transforma esse rva em offset e armazena na variavel
+            auto itd = (IMAGE_THUNK_DATA*)(buffer.data() + Image_Thunk_DataOffset); // cria uma variavel ponteiro itd  com o tipo IMAGE_THUNK_DATA apontada pro inicio de IMAGE_THUNK_DATA somando o  buffer.data() com o offset da variavel Image_Thunk_DataOffset(guarda entrada de thunks e cada entrada é uma funcao importada ou variavel de outra dll)
 
             // percorre o array de thunks ate encontrar o elemento zerado (fim da lista)
             while (itd->u1.AddressOfData != 0) {
                 // u1.AddressOfData e um RVA para IMAGE_IMPORT_BY_NAME
                 // IMAGE_IMPORT_BY_NAME contem o hint e o nome da funcao importada
-                DWORD Image_Import_By_NameOffset = rvaToOffset(nt, itd->u1.AddressOfData);
-                auto iibn = (IMAGE_IMPORT_BY_NAME*)(buffer.data() + Image_Import_By_NameOffset);
-                std::cout << "Functions import:" << iibn->Name << std::endl;
-                itd++; // avanca para a proxima funcao importada
+                DWORD Image_Import_By_NameOffset = rvaToOffset(nt, itd->u1.AddressOfData); // itd aponta para struct e busca dentro da struct o u1.AddressOfData que é um RVA, depois a funcao transforma em offset e armazena na variavel
+                auto iibn = (IMAGE_IMPORT_BY_NAME*)(buffer.data() + Image_Import_By_NameOffset); //cria uma variavel com o cast de um ponteiro para uma struct, armazena o endereco  onde comeca a struct no buffer pegando a posicao de buffer.data() e somando com o offset (incio de IMAGE_IMPORT_BY_NAME)
+                std::cout << "Functions import:" << iibn->Name << std::endl;// iibn é um ponteiro que contem o endereco do inicio da struct, iibn -> Name busca dentro da struct o campo Name 
+                itd++; // avanca para o proximo thunk(funcao ou variavel importada)
             }
             std::cout << "\n";
         }
@@ -71,13 +71,25 @@ int runIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt) {
 }
 
 int resolveIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt, LPVOID base_address) {
+    auto peb = (PEB*)__readgsqword(0x60);
     auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
     DWORD IatOffset = rvaToOffset(nt, IAT);
     auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset);
     while (iid->Name != 0) {
         DWORD NameOffset = rvaToOffset(nt, iid->Name);
         LPCSTR dllName = (char*)(buffer.data() + NameOffset);
-        HMODULE hDll = LoadLibraryA(dllName);
+        auto current = peb->Ldr->InMemoryOrderModuleList.Flink
+        auto end = &peb->Ldr->InMemoryOrderModuleList
+        while (current != end){
+            auto entry = (LDR_DATA_TABLE_ENTRY*)(current);
+            HMODULE hDll = (HMODULE)entry->Dllbase;
+            if (_wcsicmp(dllName,(LPCSTR)hDll)) {
+                HMODULE hDll = current;
+            }
+            current == current->Flink;
+            }
+        }
+        //HMODULE hDll = LoadLibraryA(dllName);
         auto orig = (IMAGE_THUNK_DATA*)(buffer.data() + rvaToOffset(nt, iid->OriginalFirstThunk));
         auto iat = (IMAGE_THUNK_DATA*)((BYTE*)base_address + iid->FirstThunk);
         while (orig->u1.AddressOfData != 0) {
@@ -117,10 +129,10 @@ int runPE() {
     std::vector<char> buffer((std::istreambuf_iterator<char>(file)),
         std::istreambuf_iterator<char>());
 
-    //header do image_dos
-    auto dos = (IMAGE_DOS_HEADER*)buffer.data();
+    
+    auto dos = (IMAGE_DOS_HEADER*)buffer.data(); //cria um ponteiro que guarda o endereco, ele aponta para o inicio da struct IMAGE_DOS_HEADER
 
-    // para acessar o stub, basta pegar o endereço do buffer e somar o tamanho do header do image_dos (quase nunca)
+    // para acessar o stub, basta pegar o endereço do buffer e somar o tamanho do header do image_dos (quase nunca é necessario acessar o stub)
     // char* stub = buffer.data() + sizeof(IMAGE_DOS_HEADER);
 
     //verificar se a dll é um MZ valido
@@ -129,7 +141,7 @@ int runPE() {
         std::cout << "Nao eh um MZ valido\n";  //e_magic e o inicio do header do image_dos, e o signature é o primeiro campo do header do image_dos, então basta verificar se o valor do campo e_magic é igual a MZ (0x5A4D) para verificar se é um MZ valido
         return 1; //retorna 1 para apontar um erro ao completar a execucao
     }
-    //inicio do nt_header (PE header)  
+    //cria um ponteiro que guarda o endereco do inicio da struct IMAGE_NT_HEADERS 
     auto nt = (IMAGE_NT_HEADERS*)(buffer.data() + dos->e_lfanew); //e_lfanew é o offset do nt_header a partir do inicio do arquivo
 
     // verificar se a dll é um PE valido
@@ -160,11 +172,14 @@ int runPE() {
 
 
     }
-    DWORD ep = nt->OptionalHeader.AddressOfEntryPoint; // guarda o entrypoint na variavel ep
+    DWORD ep = nt->OptionalHeader.AddressOfEntryPoint; // guarda o valor de  RVA do entrypoint na variavel ep
+   
     DWORD epOffset = rvaToOffset(nt, ep); // converte o RVA do entrypoint para offset 
+    if (ep == 0) cout << "Não tem entrypoint ! \n\n";
+    else{
     std::cout << "EntryPoint RVA:    0x" << std::hex << ep << std::endl;
     std::cout << "EntryPoint Offset: 0x" << std::hex << epOffset << "\n\n";
-
+    }
 
     //funcao pra listar os imports (IAT)
     runIAT(buffer, nt);
