@@ -2,6 +2,51 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <winternl.h>
+
+typedef struct _LDR_DATA_TABLE_ENTRY_FULL { // recriar struct pois basedllname nao existe na ldr data table entry padrao                                                  
+    LIST_ENTRY InLoadOrderLinks;            // portanto e necessario criar essa struct pra acessar esse campo ja existente 
+    LIST_ENTRY InMemoryOrderLinks;
+    LIST_ENTRY InInitializationOrderLinks;
+    PVOID DllBase; 
+    PVOID EntryPoint;
+    ULONG SizeOfImage;
+    UNICODE_STRING FullDllName; //C:\Windows\System32\kernel32.dll - exemplo de output
+    UNICODE_STRING BaseDllName; //kernel32.dll  - exemplo de output
+} LDR_DATA_TABLE_ENTRY_FULL;
+/* typedef struct _LDR_DATA_TABLE_ENTRY {
+    LIST_ENTRY InLoadOrderLinks;
+    LIST_ENTRY InMemoryOrderLinks;
+    LIST_ENTRY InInitializationOrderLinks;
+    PVOID DllBase;
+    PVOID EntryPoint;
+    ULONG SizeOfImage;
+    UNICODE_STRING FullDllName;
+    // PARA AQUI — BaseDllName não existe
+} LDR_DATA_TABLE_ENTRY;*/ 
+typedef struct _PEB_LDR_DATA_FULL { //necessario criar struct full pois a struct padrao do LDR atraves do winternl 
+    ULONG Length;                   // é incompleta e nao traz "InLoadOrderModuleList" consequentemente tendo que fazer um calculo 
+    BOOLEAN Initialized;            // não necessario para acessar o inicio do array
+    PVOID SsHandle;
+    LIST_ENTRY InLoadOrderModuleList;
+    LIST_ENTRY InMemoryOrderModuleList;
+    LIST_ENTRY InInitializationOrderModuleList;
+} PEB_LDR_DATA_FULL;
+/*typedef struct _PEB_LDR_DATA {
+    BYTE       Reserved1[8];
+    PVOID      Reserved2[3];
+    LIST_ENTRY InMemoryOrderModuleList;
+} PEB_LDR_DATA, * PPEB_LDR_DATA;
+*/
+
+typedef struct _PEB_FULL { //mesmo motivo dos anteriores
+    BYTE Reserved1[2];
+    BYTE BeingDebugged;
+    BYTE Reserved2[1];
+    PVOID Reserved3[2];
+    _PEB_LDR_DATA_FULL* Ldr;
+} PEB_FULL;
+
 
 using DllMain_t = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
 //FORMATO PE = header do image_dos -> dos_stub -> header do image_nt -> section_header -> section 
@@ -25,7 +70,7 @@ int rvaToOffset(IMAGE_NT_HEADERS* nt, DWORD RVA) {
     return 0; // RVA não encontrado em nenhuma seção
 }
 
-int runIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt) {
+int runIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt) { //funcao para percorrer a tabela de imports
   
     //RVA DO Import Table(IAT) 
     auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress; // guarda o valor do ponteiro ntheader  apontado para o array DataDirectory indice 1 == Import Table pegando o valor do RVA
@@ -70,42 +115,74 @@ int runIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt) {
 
 }
 
+
 int resolveIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt, LPVOID base_address) {
-    auto peb = (PEB*)__readgsqword(0x60);
-    auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-    DWORD IatOffset = rvaToOffset(nt, IAT);
-    auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset);
-    while (iid->Name != 0) {
-        DWORD NameOffset = rvaToOffset(nt, iid->Name);
-        LPCSTR dllName = (char*)(buffer.data() + NameOffset);
-        auto current = peb->Ldr->InMemoryOrderModuleList.Flink
-        auto end = &peb->Ldr->InMemoryOrderModuleList
-        while (current != end){
-            auto entry = (LDR_DATA_TABLE_ENTRY*)(current);
-            HMODULE hDll = (HMODULE)entry->Dllbase;
-            if (_wcsicmp(dllName,(LPCSTR)hDll)) {
-                HMODULE hDll = current;
+    auto pebFULL = (PEB_FULL*)__readgsqword(0x60); // variavel que guarda um ponteiro pro registrador do peb do tipo struct criado no inicio do script
+    //auto peb = (PEB*)__readgsqword(0x60);
+    auto ldr = (_PEB_LDR_DATA_FULL*)pebFULL->Ldr; //variavel que guarda um ponteiro do tipo _PEB_LDR_DATA_FULL(struct criada no inicio do script) que aponta para o campo ldr da struct PEB FULL
+    auto IAT = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress; //variavel que guarda o RVA do import table no array dataDirectory dentro de nt header->Optionalheader
+    DWORD IatOffset = rvaToOffset(nt, IAT); // converte RVA do import table para offset 
+    auto iid = (IMAGE_IMPORT_DESCRIPTOR*)(buffer.data() + IatOffset); // variavel que guarda o endereco do inicio da import table
+    HMODULE hDll = nullptr; // guarda o DllBase(endereco do inicio da dll) da DLL encontrada no PEB, inicia como nullptr
+
+
+    while (iid->Name != 0) { //enquanto a RVA dos imports != de 0
+        DWORD NameOffset = rvaToOffset(nt, iid->Name); //transforma RVA dos imports em offset
+        LPCSTR dllName = (char*)(buffer.data() + NameOffset); // variavel que contem o endereco do nome da dll
+        auto current = ldr->InLoadOrderModuleList.Flink; //variavel que guarda o inicio dos modulos carregados no processo
+        auto end = &ldr->InLoadOrderModuleList;// variavel que guarda o fim da lista de modulos carregados
+
+        wchar_t nomeDllwide[MAX_PATH]; //cria uma variavel wchar, wchar = dobro de bytes de um char=1byte normal, por padrao char e ascii, wchar=2bytes tem suporte para utf-16/unicode
+        MultiByteToWideChar(CP_ACP, 0, dllName, -1, nomeDllwide, 260);// convertendo dllname char para wchar
+
+        while (current != end) { //enquanto modulo atual for diferente do modulo final 
+            auto entry = (_LDR_DATA_TABLE_ENTRY_FULL*)(current); // cria variavel ponteiro apontando pro endereco dentro de current
+                                                                // cast de current para a struct completa do modulo
+                                                                // permite acessar os campos DllBase e BaseDllName do modulo atual
+            
+            if (_wcsicmp(entry->BaseDllName.Buffer, nomeDllwide) == 0) { // se a comparacao entre o valor do endereco da BaseDllName e nome da Dll wchar_T forem iguais( igual a 0) entao faca
+
+                hDll = (HMODULE)entry->DllBase; // joga pra variavel hDll o endereco da dll
+                break;
             }
-            current == current->Flink;
-            }
+            current = current->Flink; //pula para o proximo da lista
         }
-        //HMODULE hDll = LoadLibraryA(dllName);
-        auto orig = (IMAGE_THUNK_DATA*)(buffer.data() + rvaToOffset(nt, iid->OriginalFirstThunk));
-        auto iat = (IMAGE_THUNK_DATA*)((BYTE*)base_address + iid->FirstThunk);
-        while (orig->u1.AddressOfData != 0) {
-            DWORD Image_Import_By_NameOffset = rvaToOffset(nt, orig->u1.AddressOfData);
-            auto iibn = (IMAGE_IMPORT_BY_NAME*)(buffer.data() + Image_Import_By_NameOffset);
-            FARPROC funcAddr = GetProcAddress(hDll, iibn->Name);
+
+   
+        auto orig = (IMAGE_THUNK_DATA*)(buffer.data() + rvaToOffset(nt, iid->OriginalFirstThunk)); // cria uma variavel com o endereco do primeiro thunk
+        auto iat = (IMAGE_THUNK_DATA*)((BYTE*)base_address + iid->FirstThunk); // aponta para o slot da IAT na memoria alocada onde sera escrito o endereco real da funcao
+                                                                                // FirstThunk e o RVA do array de slots na IAT
+                                                                                // base_address + FirstThunk = endereco do slot na memoria mapeada
+        if (hDll == nullptr) {
+            std::cout << "ERRO: DLL nao encontrada no PEB:" << dllName << "\n";
+            iid++;
+            continue; // pula para a proxima DLL
+        }
+        while (orig->u1.AddressOfData != 0) {// enquanto ainda existir funcao no array (!= 0) faca
+
+            DWORD Image_Import_By_NameOffset = rvaToOffset(nt, orig->u1.AddressOfData); // converte RVA para Offset do addressofdata
+            auto iibn = (IMAGE_IMPORT_BY_NAME*)(buffer.data() + Image_Import_By_NameOffset); // cria o cast para acessar o campo name da funcao, contem 2 campos:
+                                                                                            // Hint — indice da funcao na export table (usado para otimizacao)
+                                                                                            // Name — nome da funcao em ASCII ex: "MessageBoxA"
+            
+            FARPROC funcAddr = GetProcAddress(hDll, iibn->Name); // getprocaddres retorna o endereco da funcao e passa para a variavel
             *(ULONGLONG*)iat = (ULONGLONG)funcAddr;
+            // escreve o endereco real da funcao no slot da IAT na memoria mapeada
+            // agora quando a DLL chamar essa funcao, ela vai encontrar o endereco correto
+
             if (funcAddr == nullptr) {
                 std::cout << "ERRO: funcao nao resolvida: " << iibn->Name << "\n";
 
             }
-            orig++;
-            iat++;
+
+            orig++;// pula pro proximo thunk
+            iat++; // pula pro proximo slot
         }
-        iid++;
+        iid++; //pula pro proximo rva da lista de imports
     }
+
+    //int runEAT() {}
+    
     
    
     
@@ -115,10 +192,11 @@ int resolveIAT(std::vector<char>& buffer, IMAGE_NT_HEADERS* nt, LPVOID base_addr
 
 
     
-
+//C:\Users\dudue\source\repos\Estudo_LoaderDLL\x64\Debug
 
 int runPE() {
-    std::ifstream file("C:\\Users\\windowsuser\\Desktop\\windows-pe-parser\\x64\\Debug\\TESTDll.dll", std::ios::binary); //abre arquivo da dll em modo binario
+    LoadLibraryA("user32.dll");
+    std::ifstream file("C:\\Users\\dudue\\source\\repos\\Estudo_LoaderDLL\\x64\\Debug\\TESTDll.dll", std::ios::binary); //abre arquivo da dll em modo binario
     if (!file) { //verifica se o file e false, se for false significa que o arquivo nao foi aberto corretamente, entao imprime a mensagem de erro e retorna 1 para apontar um erro ao completar a execucao
         std::cout << "Erro ao abrir DLL\n";
         return 1;
@@ -175,7 +253,9 @@ int runPE() {
     DWORD ep = nt->OptionalHeader.AddressOfEntryPoint; // guarda o valor de  RVA do entrypoint na variavel ep
    
     DWORD epOffset = rvaToOffset(nt, ep); // converte o RVA do entrypoint para offset 
-    if (ep == 0) cout << "Não tem entrypoint ! \n\n";
+    if (ep == 0) {
+        std::cout << "Não tem entrypoint ! \n\n";
+    }
     else{
     std::cout << "EntryPoint RVA:    0x" << std::hex << ep << std::endl;
     std::cout << "EntryPoint Offset: 0x" << std::hex << epOffset << "\n\n";
@@ -292,8 +372,9 @@ int runPE() {
 }
 
 int main() {
-
+    
     runPE();
 
     return 0;
 }
+

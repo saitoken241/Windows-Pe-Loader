@@ -9,7 +9,7 @@ BOOL APIENTRY DllMain( HMODULE hModule,
     switch (ul_reason_for_call)
     {
     case DLL_PROCESS_ATTACH:
-        MessageBoxA(nullptr, "Manual Map funcionou!", "Sucesso", MB_OK);
+        MessageBoxA(nullptr, "Manual Map Funcionou! \n PEB walking Funcionou!", "Sucesso", MB_OK);
         break;
     case DLL_THREAD_ATTACH:
     case DLL_THREAD_DETACH:
